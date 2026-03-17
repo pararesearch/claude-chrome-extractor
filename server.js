@@ -332,7 +332,7 @@ app.get('/search/status/:jobId', (req, res) => {
 
 // --- Simple single-page fetch + extract ---
 app.post('/extract', async (req, res) => {
-  const { url, query, model } = req.body;
+  const { url, query, model, maxBudget, timeoutMs } = req.body;
 
   if (!url || !query) {
     return res.status(400).json({ error: 'url and query are required' });
@@ -361,8 +361,8 @@ Return the extracted data as structured JSON. Only include facts found on the pa
 
     const result = await runClaudeWithLimit(prompt, {
       model: model || 'claude-sonnet-4-6',
-      maxBudget: 0.25,
-      timeoutMs: 60_000,
+      maxBudget: maxBudget || 1.0,
+      timeoutMs: timeoutMs || 120_000,
     });
 
     res.json({
