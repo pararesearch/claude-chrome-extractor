@@ -17,11 +17,33 @@ import { spawn } from 'child_process';
 import crypto from 'crypto';
 
 const PORT = process.env.PORT || 3456;
+const MAX_CONCURRENT = parseInt(process.env.MAX_CONCURRENT || '5', 10);
 const app = express();
 app.use(express.json({ limit: '5mb' }));
 
 // Active research jobs for status polling
 const activeJobs = new Map(); // jobId → { status, result, error, startedAt, query }
+
+// --- Concurrency limiter ---
+let runningCount = 0;
+const waitQueue = []; // array of resolve callbacks
+
+function acquireSlot() {
+  if (runningCount < MAX_CONCURRENT) {
+    runningCount++;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => waitQueue.push(resolve));
+}
+
+function releaseSlot() {
+  if (waitQueue.length > 0) {
+    const next = waitQueue.shift();
+    next(); // hand the slot to the next waiter
+  } else {
+    runningCount--;
+  }
+}
 
 // --- Spawn Claude CLI and capture output ---
 function runClaude(prompt, options = {}) {
@@ -108,34 +130,9 @@ function runClaude(prompt, options = {}) {
   });
 }
 
-// --- Health check ---
-app.get('/health', (req, res) => {
-  res.json({
-    ok: true,
-    activeJobs: activeJobs.size,
-    uptime: process.uptime(),
-  });
-});
-
-// --- Deep research endpoint (synchronous — waits for result) ---
-app.post('/search', async (req, res) => {
-  const { query, model, maxBudget, timeoutMs } = req.body;
-
-  if (!query) {
-    return res.status(400).json({ error: 'query is required' });
-  }
-
-  const jobId = crypto.randomUUID();
-
-  try {
-    console.log(`\n${'='.repeat(60)}`);
-    console.log(`[Search] Job ${jobId.slice(0, 8)}`);
-    console.log(`[Search] Query: "${query}"`);
-    console.log(`${'='.repeat(60)}`);
-
-    activeJobs.set(jobId, { status: 'running', query, startedAt: Date.now() });
-
-    const systemPrompt = `You are an elite people research agent. Your job is to find comprehensive information about a person, company, or topic using web search.
+// --- Shared research prompt ---
+function buildResearchPrompt() {
+  return `You are an elite people research agent. Your job is to find comprehensive information about a person, company, or topic using web search.
 
 ## CRITICAL FIRST STEP
 Before doing anything, you MUST load the web tools by calling ToolSearch twice:
@@ -187,10 +184,51 @@ Return ONLY a comprehensive JSON dossier with ALL information found:
 }
 
 Only include fields where you found actual data. NEVER fabricate information.`;
+}
 
-    const result = await runClaude(query, {
+// --- Concurrency-limited Claude runner ---
+async function runClaudeWithLimit(prompt, options = {}) {
+  await acquireSlot();
+  try {
+    return await runClaude(prompt, options);
+  } finally {
+    releaseSlot();
+  }
+}
+
+// --- Health check ---
+app.get('/health', (req, res) => {
+  res.json({
+    ok: true,
+    activeJobs: activeJobs.size,
+    runningProcesses: runningCount,
+    queuedRequests: waitQueue.length,
+    maxConcurrent: MAX_CONCURRENT,
+    uptime: process.uptime(),
+  });
+});
+
+// --- Deep research endpoint (synchronous — waits for result) ---
+app.post('/search', async (req, res) => {
+  const { query, model, maxBudget, timeoutMs } = req.body;
+
+  if (!query) {
+    return res.status(400).json({ error: 'query is required' });
+  }
+
+  const jobId = crypto.randomUUID();
+
+  try {
+    console.log(`\n${'='.repeat(60)}`);
+    console.log(`[Search] Job ${jobId.slice(0, 8)}`);
+    console.log(`[Search] Query: "${query}"`);
+    console.log(`${'='.repeat(60)}`);
+
+    activeJobs.set(jobId, { status: 'running', query, startedAt: Date.now() });
+
+    const result = await runClaudeWithLimit(query, {
       model: model || 'claude-sonnet-4-6',
-      systemPrompt,
+      systemPrompt: buildResearchPrompt(),
       maxBudget: maxBudget || 1.0,
       timeoutMs: timeoutMs || 300_000,
       onProgress: (text) => {
@@ -236,55 +274,9 @@ app.post('/search/async', async (req, res) => {
   activeJobs.set(jobId, { status: 'running', query, startedAt: Date.now() });
 
   // Fire and forget — client polls /search/status/:jobId
-  const systemPrompt = `You are an elite people research agent. Your job is to find comprehensive information about a person, company, or topic using web search.
-
-## Research Process
-1. Start by searching for the target on Google via WebSearch
-2. Visit the most relevant results using WebFetch — especially LinkedIn profiles, company pages, Twitter/X, personal websites, news articles
-3. For each page, extract all useful data
-4. If you find links to more relevant pages (e.g., a company website mentioned on LinkedIn, a personal blog, GitHub, speaking events), follow those too
-5. Keep searching and following leads until you have a comprehensive picture
-6. Cross-reference information across sources for accuracy
-
-## Be Thorough
-- Search from multiple angles: name + company, name + LinkedIn, name + Twitter, company + team page, etc.
-- Don't stop after one search — do at least 3-5 different searches
-- Visit at LEAST 5-10 pages before concluding
-- If a LinkedIn profile links to a personal website or blog, visit that too
-- If you find the person's company, visit the company's about/team page
-- Look for conference talks, podcast appearances, blog posts, GitHub repos
-
-## Output Format
-Return a comprehensive JSON dossier with ALL information found:
-{
-  "name": "Full Name",
-  "title": "Current Job Title",
-  "company": "Current Company",
-  "location": "City, Country",
-  "linkedin": "URL",
-  "twitter": "URL",
-  "github": "URL",
-  "website": "URL",
-  "email": "if publicly available",
-  "phone": "if publicly available",
-  "bio": "Professional summary",
-  "experience": [{ "company": "", "title": "", "dates": "", "description": "" }],
-  "education": [{ "school": "", "degree": "", "dates": "" }],
-  "skills": ["skill1", "skill2"],
-  "achievements": ["notable things"],
-  "speaking": ["conferences/events"],
-  "publications": ["articles/papers"],
-  "social_profiles": [{ "platform": "", "url": "" }],
-  "sources": ["URLs where each piece of info was found"],
-  "confidence": "high/medium/low",
-  "notes": "any caveats or uncertainties"
-}
-
-Only include fields where you found actual data. NEVER fabricate information.`;
-
-  runClaude(query, {
+  runClaudeWithLimit(query, {
     model: model || 'claude-sonnet-4-6',
-    systemPrompt,
+    systemPrompt: buildResearchPrompt(),
     maxBudget: maxBudget || 1.0,
     timeoutMs: timeoutMs || 300_000,
     onProgress: (text) => {
@@ -348,7 +340,7 @@ ${query}
 
 Return the extracted data as structured JSON. Only include facts found on the page.`;
 
-    const result = await runClaude(prompt, {
+    const result = await runClaudeWithLimit(prompt, {
       model: model || 'claude-sonnet-4-6',
       maxBudget: 0.25,
       timeoutMs: 60_000,
@@ -363,6 +355,63 @@ Return the extracted data as structured JSON. Only include facts found on the pa
     console.error(`[Extract] Error: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
+});
+
+// --- Batch search: fire multiple queries in parallel ---
+app.post('/search/batch', async (req, res) => {
+  const { queries, model, maxBudget, timeoutMs } = req.body;
+
+  if (!queries || !Array.isArray(queries) || queries.length === 0) {
+    return res.status(400).json({ error: 'queries (array of strings) is required' });
+  }
+
+  if (queries.length > 20) {
+    return res.status(400).json({ error: 'Max 20 queries per batch' });
+  }
+
+  const jobIds = [];
+  const systemPrompt = buildResearchPrompt();
+
+  console.log(`\n${'='.repeat(60)}`);
+  console.log(`[Batch] ${queries.length} queries firing in parallel`);
+  console.log(`${'='.repeat(60)}`);
+
+  for (const query of queries) {
+    const jobId = crypto.randomUUID();
+    jobIds.push(jobId);
+
+    console.log(`[Batch] Job ${jobId.slice(0, 8)} — "${query}"`);
+    activeJobs.set(jobId, { status: 'queued', query, startedAt: Date.now() });
+
+    runClaudeWithLimit(query, {
+      model: model || 'claude-sonnet-4-6',
+      systemPrompt,
+      maxBudget: maxBudget || 1.0,
+      timeoutMs: timeoutMs || 300_000,
+      onProgress: (text) => {
+        const job = activeJobs.get(jobId);
+        if (job) {
+          job.status = 'running';
+          job.partialOutput = (job.partialOutput || '') + text;
+        }
+      },
+    })
+      .then((result) => {
+        activeJobs.set(jobId, { status: 'complete', result: result.output, elapsed: result.elapsed, query });
+        console.log(`[Batch] Job ${jobId.slice(0, 8)} complete — ${result.elapsed}s`);
+      })
+      .catch((err) => {
+        activeJobs.set(jobId, { status: 'failed', error: err.message, query });
+        console.error(`[Batch] Job ${jobId.slice(0, 8)} failed: ${err.message}`);
+      });
+  }
+
+  res.json({
+    ok: true,
+    jobIds,
+    total: queries.length,
+    message: `${queries.length} jobs queued. Poll /search/status/:jobId for results.`,
+  });
 });
 
 // --- List active jobs ---
@@ -393,10 +442,13 @@ app.listen(PORT, () => {
   console.log(`\n  Claude Research Server (Headless CLI)`);
   console.log(`  Server:  http://localhost:${PORT}`);
   console.log(`  Health:  http://localhost:${PORT}/health`);
+  console.log(`  Concurrency: max ${MAX_CONCURRENT} parallel Claude processes`);
   console.log(`\n  Endpoints:`);
   console.log(`    POST /search        — sync deep research (waits for result)`);
   console.log(`    POST /search/async  — async research (returns jobId, poll /search/status/:jobId)`);
+  console.log(`    POST /search/batch  — batch: fire multiple queries in parallel`);
   console.log(`    POST /extract       — fetch single URL + extract data`);
-  console.log(`    GET  /jobs          — list active research jobs`);
+  console.log(`    GET  /search/status/:jobId — poll job result`);
+  console.log(`    GET  /jobs          — list all active research jobs`);
   console.log(`\n  To expose via ngrok: ngrok http ${PORT}\n`);
 });
