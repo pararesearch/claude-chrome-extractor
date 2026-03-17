@@ -1,0 +1,16 @@
+{
+  "name": "claude-chrome-extractor",
+  "version": "1.0.0",
+  "description": "Local server + Chrome extension that accepts queries via ngrok, extracts page data using Claude, and returns results",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "tunnel": "ngrok http 3456"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "express": "^4.21.0",
+    "ws": "^8.18.0"
+  }
+}
