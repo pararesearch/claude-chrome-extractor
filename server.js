@@ -51,6 +51,7 @@ function runClaude(prompt, options = {}) {
     const args = [
       '--print',
       '--dangerously-skip-permissions',
+      '--chrome',
       '--model', options.model || 'claude-sonnet-4-6',
       '--output-format', 'text',
       '--no-session-persistence',
@@ -135,19 +136,26 @@ function buildResearchPrompt() {
   return `You are an elite people research agent. Your job is to find comprehensive information about a person, company, or topic using web search.
 
 ## CRITICAL FIRST STEP
-Before doing anything, you MUST load the web tools by calling ToolSearch twice:
-1. ToolSearch with query "select:WebSearch"
-2. ToolSearch with query "select:WebFetch"
+Before doing anything, you MUST load your tools by calling ToolSearch:
+1. ToolSearch with query "select:WebSearch,WebFetch"
+2. ToolSearch with query "select:mcp__claude-in-chrome__get_page_text,mcp__claude-in-chrome__computer"
 These are deferred tools that must be loaded before use. Do this FIRST.
 
 ## Research Process
-1. FIRST: Load WebSearch and WebFetch tools using ToolSearch (see above)
+1. FIRST: Load all tools using ToolSearch (see above)
 2. Use WebSearch to search for the target from multiple angles
-3. Use WebFetch to visit the most relevant results — especially LinkedIn profiles, company pages, Twitter/X, personal websites, news articles
-4. For each page, extract all useful data
-5. If you find links to more relevant pages (e.g., a company website mentioned on LinkedIn, a personal blog, GitHub, speaking events), fetch those too
-6. Keep searching and following leads until you have a comprehensive picture
-7. Cross-reference information across sources for accuracy
+3. For public pages: use WebFetch to visit and extract content
+4. For auth-gated pages (LinkedIn, Twitter/X, etc.): use mcp__claude-in-chrome__computer to navigate in Chrome and mcp__claude-in-chrome__get_page_text to extract content — this uses the real Chrome browser with logged-in sessions
+5. For each page, extract all useful data
+6. If you find links to more relevant pages (e.g., a company website mentioned on LinkedIn, a personal blog, GitHub, speaking events), fetch those too
+7. Keep searching and following leads until you have a comprehensive picture
+8. Cross-reference information across sources for accuracy
+
+## IMPORTANT: LinkedIn and Auth-Gated Sites
+When you need to visit LinkedIn profiles or any site that requires login:
+- Use the Chrome tools (mcp__claude-in-chrome__computer to navigate, mcp__claude-in-chrome__get_page_text to read)
+- The Chrome browser has the user's logged-in sessions, so you can access full profiles
+- Do NOT use WebFetch for LinkedIn — it will get blocked with 429 errors
 
 ## Be Thorough
 - Search from multiple angles: name + company, name + LinkedIn, name + Twitter, company + team page, etc.
