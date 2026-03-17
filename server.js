@@ -341,9 +341,20 @@ app.post('/extract', async (req, res) => {
   try {
     console.log(`[Extract] URL: ${url} | Query: "${query.slice(0, 80)}"`);
 
-    const prompt = `Fetch this URL using WebFetch: ${url}
+    const prompt = `Extract data from this URL: ${url}
 
-Then extract the following from the page content:
+## CRITICAL FIRST STEP
+Load your tools first:
+1. ToolSearch with query "select:WebSearch,WebFetch"
+2. ToolSearch with query "select:mcp__claude-in-chrome__get_page_text,mcp__claude-in-chrome__computer"
+
+## Extraction
+First try WebFetch to get the page. If it fails (429, 999, blocked), use Chrome tools instead:
+- mcp__claude-in-chrome__computer to navigate to the URL in the browser
+- mcp__claude-in-chrome__get_page_text to read the page content
+Chrome has the user's logged-in sessions so it can access LinkedIn, Twitter, etc.
+
+## Query
 ${query}
 
 Return the extracted data as structured JSON. Only include facts found on the page.`;
